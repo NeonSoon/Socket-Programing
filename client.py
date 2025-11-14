@@ -4,35 +4,36 @@ from threading import Thread
 import socket
 
 # -------------------
-# 伺服器設定
+# TCP 伺服器設定
 # -------------------
-HOST = "127.0.0.1"  # 伺服器 IP
-PORT = 12345  # 伺服器 Port
-BUFFER_SIZE = 1024  # 每次接收的資料最大 bytes 數
+TCP_HOST = "127.0.0.1"  # TCP 伺服器 IP
+TCP_PORT = 12345  # TCP Port
+BUFFER_SIZE = 1024  # TCP 接收 buffer
 
-# 建立 client socket 並連線到伺服器
-client = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-client.connect((HOST, PORT))
-
+tcp_client = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+tcp_client.connect((TCP_HOST, TCP_PORT))
 
 # -------------------
-# Length-Prefix 訊息機制（與 Server 相同）
+# UDP 廣播設定
+# -------------------
+UDP_PORT = 12346  # UDP 廣播 Port
+udp_client = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+udp_client.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+udp_client.bind(("", UDP_PORT))  # 監聽所有廣播訊息
+
+
+# -------------------
+# Length-Prefix 訊息機制
 # -------------------
 def send_message_lp(conn, text):
-    """
-    傳送 length-prefix 格式訊息：
-    1. 前 4 bytes 放訊息長度
-    2. 後面接完整訊息內容
-    """
+    """傳送 length-prefix 訊息"""
     data = text.encode("utf-8")
     length = len(data).to_bytes(4, "big")
     conn.sendall(length + data)
 
 
 def recv_exact(conn, size):
-    """
-    精確接收指定長度的 bytes。
-    """
+    """精確接收指定 bytes"""
     buf = b""
     while len(buf) < size:
         part = conn.recv(size - len(buf))
@@ -43,34 +44,25 @@ def recv_exact(conn, size):
 
 
 def receive_message_lp(conn):
-    """
-    接收 length-prefix 訊息：
-    1. 先讀 4 bytes 訊息長度
-    2. 再讀完整訊息內容
-    """
+    """接收 length-prefix 訊息"""
     raw_len = recv_exact(conn, 4)
     if not raw_len:
         return None
-
     msg_len = int.from_bytes(raw_len, "big")
     data = recv_exact(conn, msg_len)
     if not data:
         return None
-
     return data.decode("utf-8")
 
 
 # -------------------
-# GUI 功能
+# TCP 訊息接收
 # -------------------
-def receive_messages():
-    """
-    不斷接收伺服器訊息（採用 length-prefix），並更新 GUI。
-    在獨立 Thread 執行以避免 GUI 卡住。
-    """
+def receive_tcp_messages():
+    """接收 TCP 訊息並更新 GUI"""
     while True:
         try:
-            msg = receive_message_lp(client)
+            msg = receive_message_lp(tcp_client)
             if msg:
                 chat_text.config(state=tk.NORMAL)
                 chat_text.insert(tk.END, msg + "\n")
@@ -80,15 +72,32 @@ def receive_messages():
             break
 
 
+# -------------------
+# UDP 廣播接收
+# -------------------
+def receive_udp_broadcasts():
+    """接收 UDP 廣播訊息並更新 GUI"""
+    while True:
+        try:
+            data, _ = udp_client.recvfrom(4096)  # 接收廣播
+            msg = data.decode("utf-8")
+            chat_text.config(state=tk.NORMAL)
+            chat_text.insert(tk.END, msg + "\n")
+            chat_text.config(state=tk.DISABLED)
+            chat_text.see(tk.END)
+        except:
+            break
+
+
+# -------------------
+# 發送 TCP 訊息
+# -------------------
 def send_message():
-    """
-    將輸入框文字送到伺服器（使用 length-prefix）。
-    若傳送失敗則顯示錯誤訊息。
-    """
+    """將輸入框訊息送到 TCP 伺服器"""
     msg = message_entry.get()
     if msg:
         try:
-            send_message_lp(client, msg)
+            send_message_lp(tcp_client, msg)
         except:
             chat_text.config(state=tk.NORMAL)
             chat_text.insert(tk.END, "[系統] 無法送出訊息，請確認連線\n")
@@ -106,7 +115,7 @@ root.title("聊天室 Client")
 chat_text = tk.Text(root, height=20, width=50, state=tk.DISABLED)
 chat_text.pack(padx=10, pady=10)
 
-# 下方輸入區
+# 訊息輸入區
 frame = tk.Frame(root)
 frame.pack(padx=10, pady=5)
 
@@ -117,19 +126,19 @@ send_button = tk.Button(frame, text="送出", width=8, command=send_message)
 send_button.pack(side=tk.LEFT)
 
 # -------------------
-# 輸入暱稱並傳送到伺服器
+# 輸入暱稱並傳送到 TCP 伺服器
 # -------------------
 username = simpledialog.askstring("暱稱", "請輸入你的暱稱:")
-
 if username:
-    send_message_lp(client, username)
+    send_message_lp(tcp_client, username)
 else:
-    send_message_lp(client, "匿名")
+    send_message_lp(tcp_client, "匿名")
 
 # -------------------
-# 啟動接收訊息 Thread
+# 啟動 TCP 與 UDP 接收 thread
 # -------------------
-Thread(target=receive_messages, daemon=True).start()
+Thread(target=receive_tcp_messages, daemon=True).start()
+Thread(target=receive_udp_broadcasts, daemon=True).start()
 
 # 開始 GUI 事件迴圈
 root.mainloop()
