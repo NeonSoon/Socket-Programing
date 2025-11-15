@@ -1,6 +1,7 @@
 import socket
 from threading import Thread
 import tkinter as tk
+import time
 
 # =========================
 # 伺服器主機與通訊埠設定
@@ -119,11 +120,42 @@ def handle_tcp_client(conn):
     TCP client handler thread：
     - 發送歡迎訊息
     - 接收使用者名稱
+    - 啟動閒置偵測
     - 廣播加入訊息
     - 接收並廣播訊息
     - 離線處理
     - 支援特定指令觸發 UDP 廣播
     """
+    last_active_time = time.time()  # 記錄使用者最後一次動作時間
+
+    def idle_monitor():
+        nonlocal last_active_time, username, conn
+
+        warned = False
+
+        while True:
+            now = time.time()
+            idle_time = now - last_active_time
+
+            if idle_time >= 240 and not warned:  # 4 分鐘未操作
+                try:
+                    send_message(
+                        conn, "[系統] 您已 4 分鐘未操作，再 1 分鐘將自動斷線。"
+                    )
+                except:
+                    pass
+                warned = True
+
+            if idle_time >= 300:  # 5 分鐘，強制斷線
+                try:
+                    send_message(conn, "[系統] 您已因為閒置超過 5 分鐘而被自動斷線。")
+                except:
+                    pass
+                conn.close()
+                return
+
+            time.sleep(5)  # 每 5 秒檢查一次
+
     try:
         # 歡迎訊息
         send_message(conn, "歡迎進入聊天室！")
@@ -133,6 +165,9 @@ def handle_tcp_client(conn):
         if username is None:
             conn.close()
             return
+
+        # 啟動閒置偵測
+        Thread(target=idle_monitor, daemon=True).start()
 
         # 記錄 TCP client 與名稱
         tcp_clients.append(conn)
@@ -154,6 +189,8 @@ def handle_tcp_client(conn):
             msg = receive_message(conn)
             if msg is None:
                 break
+
+            last_active_time = time.time()  # ← 每次收到資料就重置時間
 
             # 廣播 TCP 訊息
             broadcast_tcp(f"{username}: {msg}")

@@ -78,6 +78,9 @@ def receive_tcp_messages():
                 chat_text.config(state=tk.DISABLED)
                 chat_text.see(tk.END)
         except:
+            chat_text.config(state=tk.NORMAL)
+            chat_text.insert(tk.END, "[系統] 您已與伺服器中斷連線。\n")
+            chat_text.config(state=tk.DISABLED)
             break
 
 
