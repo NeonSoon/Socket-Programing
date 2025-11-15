@@ -3,23 +3,7 @@ from tkinter import simpledialog
 from threading import Thread
 import socket
 
-# -------------------
-# TCP 伺服器設定
-# -------------------
-TCP_HOST = "127.0.0.1"  # TCP 伺服器 IP
-TCP_PORT = 12345  # TCP Port
-BUFFER_SIZE = 1024  # TCP 接收 buffer
-
-tcp_client = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-tcp_client.connect((TCP_HOST, TCP_PORT))
-
-# -------------------
-# UDP 廣播設定
-# -------------------
-UDP_PORT = 12346  # UDP 廣播 Port
-udp_client = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-udp_client.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
-udp_client.bind(("", UDP_PORT))  # 監聽所有廣播訊息
+connected = False
 
 # =========================
 # 加密金鑰與函式
@@ -35,14 +19,12 @@ def xor_crypt(data: bytes) -> bytes:
 # Length-Prefix 訊息機制
 # -------------------
 def send_message_lp(conn, text):
-    """傳送 length-prefix 訊息"""
     data = xor_crypt(text.encode("utf-8"))
     length = len(data).to_bytes(4, "big")
     conn.sendall(length + data)
 
 
 def recv_exact(conn, size):
-    """精確接收指定 bytes"""
     buf = b""
     while len(buf) < size:
         part = conn.recv(size - len(buf))
@@ -53,7 +35,6 @@ def recv_exact(conn, size):
 
 
 def receive_message_lp(conn):
-    """接收 length-prefix 訊息"""
     raw_len = recv_exact(conn, 4)
     if not raw_len:
         return None
@@ -68,7 +49,8 @@ def receive_message_lp(conn):
 # TCP 訊息接收
 # -------------------
 def receive_tcp_messages():
-    """接收 TCP 訊息並更新 GUI"""
+    global connected
+
     while True:
         try:
             msg = receive_message_lp(tcp_client)
@@ -78,8 +60,11 @@ def receive_tcp_messages():
                 chat_text.config(state=tk.DISABLED)
                 chat_text.see(tk.END)
         except:
+            connected = False
             chat_text.config(state=tk.NORMAL)
-            chat_text.insert(tk.END, "[系統] 您已與伺服器中斷連線。\n")
+            chat_text.insert(
+                tk.END, "[系統] 您已與伺服器中斷連線。 輸入 /reconnect 以重新連線\n"
+            )
             chat_text.config(state=tk.DISABLED)
             break
 
@@ -88,10 +73,9 @@ def receive_tcp_messages():
 # UDP 廣播接收
 # -------------------
 def receive_udp_broadcasts():
-    """接收 UDP 廣播訊息並更新 GUI"""
     while True:
         try:
-            data, _ = udp_client.recvfrom(4096)  # 接收廣播
+            data, _ = udp_client.recvfrom(4096)
             msg = data.decode("utf-8")
             chat_text.config(state=tk.NORMAL)
             chat_text.insert(tk.END, msg + "\n")
@@ -102,20 +86,94 @@ def receive_udp_broadcasts():
 
 
 # -------------------
+# 重新連線（僅斷線或手動使用）
+# -------------------
+def reconnect():
+    global tcp_client, connected
+
+    try:
+        if tcp_client:
+            try:
+                tcp_client.close()
+            except:
+                pass
+
+        chat_text.config(state=tk.NORMAL)
+        chat_text.insert(tk.END, "[系統] 正在嘗試重新連線...\n")
+        chat_text.config(state=tk.DISABLED)
+
+        new_client = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        new_client.connect((TCP_HOST, TCP_PORT))
+
+        tcp_client = new_client
+        connected = True
+
+        send_message_lp(tcp_client, username)
+        Thread(target=receive_tcp_messages, daemon=True).start()
+
+        chat_text.config(state=tk.NORMAL)
+        chat_text.insert(tk.END, "[系統] 已成功重新連線！\n")
+        chat_text.config(state=tk.DISABLED)
+        chat_text.see(tk.END)
+
+    except Exception as e:
+        chat_text.config(state=tk.NORMAL)
+        chat_text.insert(tk.END, f"[系統] 重新連線失敗：{e}\n")
+        chat_text.config(state=tk.DISABLED)
+        connected = False
+
+
+# -------------------
 # 發送 TCP 訊息
 # -------------------
 def send_message():
-    """將輸入框訊息送到 TCP 伺服器"""
+    global connected
     msg = message_entry.get()
-    if msg:
-        try:
-            send_message_lp(tcp_client, msg)
-        except:
-            chat_text.config(state=tk.NORMAL)
-            chat_text.insert(tk.END, "[系統] 無法送出訊息，請確認連線\n")
-            chat_text.config(state=tk.DISABLED)
-        message_entry.delete(0, tk.END)
+    message_entry.delete(0, tk.END)
 
+    if not msg:
+        return
+
+    if msg.strip() == "/reconnect":
+        if connected == False:
+            reconnect()
+            return
+        else:
+            chat_text.config(state=tk.NORMAL)
+            chat_text.insert(tk.END, "[系統] 已在伺服器中\n")
+            chat_text.config(state=tk.DISABLED)
+            return
+
+    try:
+        if connected:
+            send_message_lp(tcp_client, msg)
+        else:
+            chat_text.config(state=tk.NORMAL)
+            chat_text.insert(tk.END, "[系統] 未連線，請輸入 /reconnect\n")
+            chat_text.config(state=tk.DISABLED)
+    except:
+        chat_text.config(state=tk.NORMAL)
+        chat_text.insert(tk.END, "[系統] 傳送失敗，請輸入 /reconnect\n")
+        chat_text.config(state=tk.DISABLED)
+        connected = False
+
+
+# -------------------
+# TCP / UDP 設定
+# -------------------
+TCP_HOST = "127.0.0.1"
+TCP_PORT = 12345
+BUFFER_SIZE = 1024
+tcp_client = None
+connected = False
+
+UDP_PORT = 12346
+udp_client = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+udp_client.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+udp_client.setsockopt(
+    socket.SOL_SOCKET, socket.SO_REUSEADDR, 1
+)  # 允許多個 socket 綁定同 port
+udp_client.bind(("", UDP_PORT))  # 固定 12346
 
 # -------------------
 # GUI 主程式
@@ -123,11 +181,9 @@ def send_message():
 root = tk.Tk()
 root.title("聊天室 Client")
 
-# 聊天訊息顯示區
 chat_text = tk.Text(root, height=20, width=50, state=tk.DISABLED)
 chat_text.pack(padx=10, pady=10)
 
-# 訊息輸入區
 frame = tk.Frame(root)
 frame.pack(padx=10, pady=5)
 
@@ -138,19 +194,31 @@ send_button = tk.Button(frame, text="送出", width=8, command=send_message)
 send_button.pack(side=tk.LEFT)
 
 # -------------------
-# 輸入暱稱並傳送到 TCP 伺服器
+# 輸入暱稱
 # -------------------
 username = simpledialog.askstring("暱稱", "請輸入你的暱稱:")
-if username:
-    send_message_lp(tcp_client, username)
-else:
-    send_message_lp(tcp_client, "匿名")
+if not username:
+    username = "匿名"
 
 # -------------------
-# 啟動 TCP 與 UDP 接收 thread
+# 第一次連線（不使用 reconnect）
+# -------------------
+try:
+    tcp_client = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    tcp_client.connect((TCP_HOST, TCP_PORT))
+    connected = True
+    send_message_lp(tcp_client, username)
+except Exception as e:
+    chat_text.config(state=tk.NORMAL)
+    chat_text.insert(tk.END, f"[系統] 連線失敗：{e}\n")
+    chat_text.insert(tk.END, "[系統] 請使用 /reconnect 嘗試重新連線\n")
+    chat_text.config(state=tk.DISABLED)
+    connected = False
+
+# -------------------
+# 啟動 TCP / UDP 接收 thread
 # -------------------
 Thread(target=receive_tcp_messages, daemon=True).start()
 Thread(target=receive_udp_broadcasts, daemon=True).start()
 
-# 開始 GUI 事件迴圈
 root.mainloop()
