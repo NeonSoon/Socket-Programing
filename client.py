@@ -21,13 +21,22 @@ udp_client = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 udp_client.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
 udp_client.bind(("", UDP_PORT))  # 監聽所有廣播訊息
 
+# =========================
+# 加密金鑰與函式
+# =========================
+KEY = 87  # 任意 0~255 的整數，用來 XOR 加密
+
+
+def xor_crypt(data: bytes) -> bytes:
+    return bytes([b ^ KEY for b in data])
+
 
 # -------------------
 # Length-Prefix 訊息機制
 # -------------------
 def send_message_lp(conn, text):
     """傳送 length-prefix 訊息"""
-    data = text.encode("utf-8")
+    data = xor_crypt(text.encode("utf-8"))
     length = len(data).to_bytes(4, "big")
     conn.sendall(length + data)
 
@@ -52,7 +61,7 @@ def receive_message_lp(conn):
     data = recv_exact(conn, msg_len)
     if not data:
         return None
-    return data.decode("utf-8")
+    return xor_crypt(data).decode("utf-8")
 
 
 # -------------------
