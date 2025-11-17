@@ -1,7 +1,9 @@
+# ===== Modified server.py with non-blocking send queues =====
 import socket
 from threading import Thread
 import tkinter as tk
 import time
+from queue import Queue
 
 # =========================
 # 伺服器主機與通訊埠設定
@@ -18,16 +20,15 @@ BROADCAST_IP = "<broadcast>"  # 255.255.255.255
 # =========================
 KEY = 87  # 任意 0~255 的整數，用來 XOR 加密
 
-
 def xor_crypt(data: bytes) -> bytes:
     return bytes([b ^ KEY for b in data])
 
-
 # =========================
-# 儲存 TCP client 與名稱
+# 儲存 TCP client 與名稱 + 傳送 Queue
 # =========================
 tcp_clients = []
 tcp_usernames = []
+send_queues = {}  # 每一個 client 一個 Queue
 
 # =========================
 # 建立 UDP 廣播 socket
@@ -47,25 +48,15 @@ KEYWORD_RESPONSES = {
     \n幹這到底又是什麼東西不可以啦\n這是能講的話嗎絕對不可以的啊",
 }
 
-
-# -----------------------------------------
-# 長訊息傳輸函數（TCP length-prefix）
-# -----------------------------------------
+# -----------------------
+# Length-Prefix 傳輸
+# -----------------------
 def send_message(conn, text):
-    """
-    使用 length-prefix 傳送訊息：
-    - 先傳 4 bytes 表示訊息長度
-    - 再傳送真正訊息內容
-    """
-    data = xor_crypt(text.encode("utf-8"))  # 加密
+    data = xor_crypt(text.encode("utf-8"))
     length = len(data).to_bytes(4, "big")
     conn.sendall(length + data)
 
-
 def recv_exact(conn, size):
-    """
-    從 socket 精確讀取指定 bytes
-    """
     buf = b""
     while len(buf) < size:
         part = conn.recv(size - len(buf))
@@ -74,11 +65,7 @@ def recv_exact(conn, size):
         buf += part
     return buf
 
-
 def receive_message(conn):
-    """
-    接收 length-prefix 格式完整訊息
-    """
     raw_len = recv_exact(conn, 4)
     if not raw_len:
         return None
@@ -86,96 +73,75 @@ def receive_message(conn):
     data = recv_exact(conn, msg_len)
     if not data:
         return None
-    return xor_crypt(data).decode("utf-8")  # 解密
-
+    return xor_crypt(data).decode("utf-8")
 
 # =========================
-# 廣播 TCP 訊息給所有 TCP client
+# 非阻塞傳送 Thread：從 Queue 取出訊息再送
+# =========================
+def sender_thread(conn):
+    q = send_queues[conn]
+    while True:
+        msg = q.get()  # Blocking，但不會卡住主程式
+        try:
+            send_message(conn, msg)
+        except:
+            break
+
+# =========================
+# 廣播 TCP：改為送到 Queue，而不是直接 sendall
 # =========================
 def broadcast_tcp(message):
     for client in tcp_clients:
         try:
-            send_message(client, message)
+            send_queues[client].put(message)
         except:
             pass
 
-
 # =========================
-# 廣播 UDP 訊息給所有 client
+# 廣播 UDP
 # =========================
 def broadcast_udp(message):
-    """
-    廣播訊息給所有 client，並在 server GUI 顯示
-    """
     udp_socket.sendto(message.encode("utf-8"), (BROADCAST_IP, UDP_PORT))
-    # 在 server GUI 顯示
-    log_message(f"{message}")
-
+    log_message(message)
 
 # =========================
-# 處理每個 TCP client
+# handle client
 # =========================
 def handle_tcp_client(conn):
-    """
-    TCP client handler thread：
-    - 發送歡迎訊息
-    - 接收使用者名稱
-    - 啟動閒置偵測
-    - 廣播加入訊息
-    - 接收並廣播訊息
-    - 離線處理
-    - 支援特定指令觸發 UDP 廣播
-    """
-    last_active_time = time.time()  # 記錄使用者最後一次動作時間
+    last_active_time = time.time()
 
     def idle_monitor():
-        nonlocal last_active_time, username, conn
-
+        nonlocal last_active_time, conn, username
         warned = False
-
         while True:
             now = time.time()
             idle_time = now - last_active_time
 
-            if idle_time >= 240 and not warned:  # 4 分鐘未操作
-                try:
-                    send_message(
-                        conn, "[系統] 您已 4 分鐘未操作，再 1 分鐘將自動斷線。"
-                    )
-                except:
-                    pass
+            if idle_time >= 240 and not warned:
+                send_queues[conn].put("[系統] 您已 4 分鐘未操作，再 1 分鐘將自動斷線。")
                 warned = True
 
-            if idle_time >= 300:  # 5 分鐘，強制斷線
-                try:
-                    send_message(conn, "[系統] 您已因為閒置超過 5 分鐘而被自動斷線。")
-                except:
-                    pass
+            if idle_time >= 300:
+                send_queues[conn].put("[系統] 您因閒置超過 5 分鐘被斷線。")
                 conn.close()
                 return
-
-            time.sleep(5)  # 每 5 秒檢查一次
+            time.sleep(5)
 
     try:
-        # 歡迎訊息
         send_message(conn, "歡迎進入聊天室！")
-
-        # 接收使用者名稱
         username = receive_message(conn)
         if username is None:
             conn.close()
             return
 
-        # 啟動閒置偵測
-        Thread(target=idle_monitor, daemon=True).start()
-
-        # 記錄 TCP client 與名稱
         tcp_clients.append(conn)
         tcp_usernames.append(username)
+        send_queues[conn] = Queue()  # 建立 Queue
 
-        # 廣播加入訊息
-        current_count = len(tcp_clients)
-        join_msg = f"{username} 已加入聊天室！目前聊天室人數：{current_count}"
+        Thread(target=sender_thread, args=(conn,), daemon=True).start()  # 啟動 sender
+        Thread(target=idle_monitor, daemon=True).start()                # 啟動 idle thread
+
+        join_msg = f"{username} 已加入聊天室！目前聊天室人數：{len(tcp_clients)}"
         broadcast_tcp(join_msg)
         log_message(join_msg)
 
@@ -183,43 +149,36 @@ def handle_tcp_client(conn):
         conn.close()
         return
 
-    # 主訊息接收迴圈
     while True:
         try:
             msg = receive_message(conn)
             if msg is None:
                 break
 
-            last_active_time = time.time()  # ← 每次收到資料就重置時間
+            last_active_time = time.time()
 
-            # 廣播 TCP 訊息
             broadcast_tcp(f"{username}: {msg}")
             log_message(f"{username}: {msg}")
 
-            # --- 自動關鍵字觸發 UDP 廣播 ---
             for keyword, reply in KEYWORD_RESPONSES.items():
-                if msg.startswith(keyword):  # 若訊息符合關鍵字
+                if msg.startswith(keyword):
                     broadcast_udp(f"[廣播] {reply} (來自 {username})")
-                    break  # 一次只觸發一個關鍵字
-
+                    break
         except:
             break
 
-    # 離線處理
     conn.close()
     if conn in tcp_clients:
         tcp_clients.remove(conn)
     if username in tcp_usernames:
         tcp_usernames.remove(username)
 
-    current_count = len(tcp_clients)
-    leave_msg = f"{username} 離開聊天室。目前聊天室人數：{current_count}"
+    leave_msg = f"{username} 離開聊天室。目前聊天室人數：{len(tcp_clients)}"
     broadcast_tcp(leave_msg)
     log_message(leave_msg)
 
-
 # =========================
-# GUI 日誌顯示
+# GUI Log
 # =========================
 def log_message(msg):
     chat_text.config(state=tk.NORMAL)
@@ -227,31 +186,26 @@ def log_message(msg):
     chat_text.config(state=tk.DISABLED)
     chat_text.see(tk.END)
 
-
 # =========================
-# TCP server 啟動
+# TCP Server
 # =========================
 def start_tcp_server():
     server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     server.bind((TCP_HOST, TCP_PORT))
     server.listen()
-    log_message(f"聊天室伺服器啟動，等待連線 {TCP_HOST}:{TCP_PORT}")
+    log_message(f"伺服器已啟動：{TCP_HOST}:{TCP_PORT}")
 
     while True:
         conn, addr = server.accept()
         Thread(target=handle_tcp_client, args=(conn,), daemon=True).start()
 
-
 # =========================
-# GUI 介面設定
+# GUI 啟動
 # =========================
 root = tk.Tk()
 root.title("server")
-
 chat_text = tk.Text(root, height=25, width=50, state=tk.DISABLED)
 chat_text.pack()
 
-# 啟動 TCP server thread
 Thread(target=start_tcp_server, daemon=True).start()
-
 root.mainloop()
